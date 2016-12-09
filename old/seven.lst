@@ -1,0 +1,1585 @@
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE  1
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                    00001         TITLE   "RS232 Communications : Half Duplex : PIC16C6x/7x/8x"
+                    00002         SUBTITLE "7-Segment n„ytt”"
+                    00003 ; PWRT - bit on
+                    00004 ;***********************************************
+                    00005 
+                    00006         Processor       16C84 ; 71
+                    00007         Radix   DEC
+                    00008         EXPAND
+                    00009 
+                    00010         CBLOCK 0x00
+  00000000          00011         _indf, _rtcc, _pcl, _status, _fsr
+  00000005          00012         _porta, _portb
+                    00013         ENDC
+                    00014 
+                    00015 
+  00000008          00016 _eedata set     0x08
+  00000009          00017 _eeadr  set     0x09
+  0000000A          00018 _pclath set     0x0a
+  0000000B          00019 _intcon set     0x0b
+                    00020 
+  00000001          00021 _option set     0x01
+  00000005          00022 _trisa  set     0x05
+  00000006          00023 _trisb  set     0x06
+  00000008          00024 _eecon1 set     0x08
+  00000009          00025 _eecon2 set     0x09
+                    00026 
+                    00027         CBLOCK  0x0C
+  0000000C          00028         TxReg   ; Transmit Data Holding/Shift Reg
+  0000000D          00029         RxReg   ; Rcv Data Holding Reg
+  0000000E          00030         RxTemp
+  0000000F          00031         SerialStatus    ; Txmt & Rev Status/Control Reg
+  00000010          00032         BitCount
+  00000011          00033         ExtraBitCount   ; Parity & Stop Bit Count
+  00000012          00034         SaveWReg        ; temp hold reg of WREG on INT
+  00000013          00035         SaveStatus      ; temp hold reg of STATUS Reg on INT
+                    00036         ENDC
+                    00037 
+                    00038 #define _txmtProgress   SerialStatus,0
+                    00039 #define _txmtEnable     SerialStatus,1
+                    00040 #define _rcvProgress    SerialStatus,2
+                    00041 #define _rcvOver        SerialStatus,3
+                    00042 #define _ParityErr      SerialStatus,4
+                    00043 #define _FrameErr       SerialStatus,5
+                    00044 #define _parityBit      SerialStatus,7
+                    00045 
+                    00046 #define _int    _portb,0
+                    00047 
+                    00048 #define _carry  _status,0
+                    00049 #define _c      _status,0
+                    00050 #define _dc     _status,1
+                    00051 #define _z      _status,2
+                    00052 #define _pd     _status,3
+                    00053 #define _to     _status,4
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE  2
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                    00054 #define _rp0    _status,5
+                    00055 #define _rp1    _status,6
+                    00056 #define _irp    _status,7
+                    00057 
+                    00058 #define _rbif   _intcon,0
+                    00059 #define _intf   _intcon,1
+                    00060 #define _rtif   _intcon,2
+                    00061 #define _rbie   _intcon,3
+                    00062 #define _inte   _intcon,4
+                    00063 #define _rtie   _intcon,5
+                    00064 
+                    00065 #define _eeie   _intcon,6       ; 16C84
+                    00066 
+                    00067 #define _gie    _intcon,7
+                    00068 
+                    00069 #define _ps0    option,0
+                    00070 #define _ps1    option,1
+                    00071 #define _ps2    option,2
+                    00072 #define _psa    option,3
+                    00073 #define _rte    option,4
+                    00074 #define _rts    option,5
+                    00075 #define _intedg option,6
+                    00076 #define _rbpu   option,7
+                    00077 
+                    00078 #define _rd     _eecon1,0
+                    00079 #define _wr     _eecon1,1
+                    00080 #define _wren   _eecon1,2
+                    00081 #define _wrerr  _eecon1,3
+                    00082 #define _eeif   _eecon1,4
+                    00083 
+  00000000          00084 _ResetVector    set     0x00
+  00000004          00085 _IntVector      set     0x04
+                    00086 
+  00000000          00087 W       equ     0
+  00000000          00088 w       equ     0
+                    00089 
+  00000001          00090 TRUE    equ     1
+  00000000          00091 FALSE   equ     0
+                    00092 
+  00000000          00093 LSB     equ     0
+  00000007          00094 MSB     equ     7
+                    00095 
+                    00096 ;******************************************************************
+                    00097 ; Pin Assignements
+                    00098 ;******************************************************************
+                    00099 
+                    00100 #define RX_MASK 0x10    ; RX pin is connected to RA4, ie. bit 4
+                    00101 #define RX_Pin  _porta,4        ; RX Pin : RA4
+                    00102 #define RX      RxTemp,4
+                    00103 #define TX      _porta,3        ; TX Pin , RA3
+                    00104 
+                    00105 #define SEG_CLK _porta,0
+                    00106 #define SEG_DATA _porta,1
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE  3
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                    00107 #define BLINK _porta,2
+                    00108 
+                    00109 ;========================================
+                    00110 
+                    00111 #define Bank_0  bcf _rp0
+                    00112 #define Bank_1  bsf _rp0
+                    00113 #define SkipIfZero btfss _z
+                    00114 #define SkipIfNotZero btfsc _z
+                    00115 #define SkipIfCarry btfss _carry
+                    00116 #define SkipIfNotCarry btfsc _carry
+                    00117 
+                    00118 GotoIfEqual macro data,vakio,osoite
+                    00119         movfw   data
+                    00120         sublw   vakio
+                    00121         SkipIfNotZero
+                    00122         goto    osoite
+                    00123         endm
+                    00124 
+                    00125 Print macro char
+                    00126         movlw   char
+                    00127         call    PutWChar
+                    00128         endm
+                    00129 
+                    00130 movlf   macro   byte,ef
+                    00131         movlw   byte
+                    00132         movwf   ef
+                    00133         endm
+                    00134 
+                    00135 prints  macro   osoite
+                    00136         local   pr2,Ohion
+                    00137         clrf    StrOsoite
+                    00138 pr2:    movfw   StrOsoite
+                    00139         incf    StrOsoite,F
+                    00140         call    osoite
+                    00141         iorlw   0
+                    00142         SkipIfNotZero
+                    00143         goto    Ohion
+                    00144         call    SegChar
+                    00145         call    Delay
+                    00146         goto    pr2
+                    00147 Ohion:
+                    00148         endm    
+                    00149 
+                    00150 
+                    00151         CBLOCK
+  00000014          00152         kirjain,paikka
+  00000016          00153         LSD, MSD, tempo,counter
+  0000001A          00154         NytNaytossa,Viivahdys,Viiva2,Viiva3
+  0000001E          00155         Roska,StrOsoite
+  00000020          00156         MitaTehda
+  00000021          00157         Paska
+                    00158         ENDC
+                    00159 
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE  4
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                    00160 
+                    00161 
+                    00162 ;******************************************************************
+                    00163 
+0000                00164         ORG     _ResetVector
+0000 28C6           00165         goto    Start
+0004                00166         ORG     _IntVector
+0004 2A1F           00167         goto    Interrupt
+                    00168 
+                    00169 ;******************************************************************
+                    00170 
+0005                00171 ekaseg:
+0005 3EE0           00172         addlw   -32
+0006 393F           00173         andlw   0x3F
+0007 0782           00174         ADDWF   _pcl,f
+0008 3400           00175         RETLW 0x00 ;  
+0009 3400           00176         RETLW 0x00 ; !
+000A 3461           00177         RETLW 0x61 ; "
+000B 34FF           00178         RETLW 0xFF ; #
+000C 34E9           00179         RETLW 0xE9 ; 0x
+000D 3400           00180         RETLW 0x00 ; %
+000E 3400           00181         RETLW 0x00 ; &
+000F 3400           00182         RETLW 0x00 ; '
+0010 3400           00183         RETLW 0x00 ; (
+0011 3400           00184         RETLW 0x00 ; )
+0012 3407           00185         RETLW 0x07 ; *
+0013 3401           00186         RETLW 0x01 ; +
+0014 3410           00187         RETLW 0x10 ; ,
+0015 3400           00188         RETLW 0x00 ; -
+0016 3400           00189         RETLW 0x00 ; .
+0017 3404           00190         RETLW 0x04 ; /
+0018 34F8           00191         RETLW 0xF8 ; 0
+0019 3400           00192         RETLW 0x00 ; 1
+001A 34D8           00193         RETLW 0xD8 ; 2
+001B 34C8           00194         RETLW 0xC8 ; 3
+001C 3420           00195         RETLW 0x20 ; 4
+001D 34E8           00196         RETLW 0xE8 ; 5
+001E 34F8           00197         RETLW 0xF8 ; 6
+001F 34C0           00198         RETLW 0xC0 ; 7
+0020 34F8           00199         RETLW 0xF8 ; 8
+0021 34E8           00200         RETLW 0xE8 ; 9
+0022 3400           00201         RETLW 0x00 ; :
+0023 3400           00202         RETLW 0x00 ;  ;
+0024 3400           00203         RETLW 0x00 ; <
+0025 3408           00204         RETLW 0x08 ; =
+0026 3406           00205         RETLW 0x06 ; >
+0027 34E0           00206         RETLW 0xE0 ; ?
+0028 3400           00207         RETLW 0x00 ; @
+0029 34F0           00208         RETLW 0xF0 ; A
+002A 34C9           00209         RETLW 0xC9 ; B
+002B 34F8           00210         RETLW 0xF8 ; C
+002C 34C9           00211         RETLW 0xC9 ; D
+002D 34F8           00212         RETLW 0xF8 ; E
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE  5
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+002E 34F0           00213         RETLW 0xF0 ; F
+002F 34F8           00214         RETLW 0xF8 ; G
+0030 3430           00215         RETLW 0x30 ; H
+0031 34C9           00216         RETLW 0xC9 ; I
+0032 34D9           00217         RETLW 0xD9 ; J
+0033 3430           00218         RETLW 0x30 ; K
+0034 3438           00219         RETLW 0x38 ; L
+0035 3432           00220         RETLW 0x32 ; M
+0036 3432           00221         RETLW 0x32 ; N
+0037 34F8           00222         RETLW 0xF8 ; O
+0038 34F0           00223         RETLW 0xF0 ; P
+0039 34F8           00224         RETLW 0xF8 ; Q
+003A 34F0           00225         RETLW 0xF0 ; R
+003B 34E8           00226         RETLW 0xE8 ; S
+003C 34C1           00227         RETLW 0xC1 ; T
+003D 3438           00228         RETLW 0x38 ; U
+003E 3434           00229         RETLW 0x34 ; V
+003F 3434           00230         RETLW 0x34 ; W
+0040 3406           00231         RETLW 0x06 ; X
+0041 3402           00232         RETLW 0x02 ; Y
+0042 34CC           00233         RETLW 0xCC ; Z
+0043 3481           00234         RETLW 0x81 ; [
+0044 3402           00235         RETLW 0x02 ; \
+0045 3449           00236         RETLW 0x49 ; ]
+0046 3400           00237         RETLW 0x00 ; ^
+0047 3408           00238         RETLW 0x08 ; _
+0048 3400           00239         RETLW 0x00 ; `
+0049 3400           00240         RETLW 0x00 ; `
+                    00241 
+004A                00242 tokaseg:        
+004A 3EE0           00243         addlw   -32
+004B 393F           00244         andlw   0x3F
+004C 0782           00245         ADDWF   _pcl,f
+004D 3400           00246         RETLW 0x00 ;  
+004E 3400           00247         RETLW 0x00 ; !
+004F 3440           00248         RETLW 0x40 ; "
+0050 34FF           00249         RETLW 0xFF ; #
+0051 346D           00250         RETLW 0x6D ; 0x
+0052 3400           00251         RETLW 0x00 ; %
+0053 3400           00252         RETLW 0x00 ; &
+0054 3400           00253         RETLW 0x00 ; '
+0055 3400           00254         RETLW 0x00 ; (
+0056 3400           00255         RETLW 0x00 ; )
+0057 34C7           00256         RETLW 0xC7 ; *
+0058 3445           00257         RETLW 0x45 ; +
+0059 3400           00258         RETLW 0x00 ; ,
+005A 3441           00259         RETLW 0x41 ; -
+005B 3400           00260         RETLW 0x00 ; .
+005C 3480           00261         RETLW 0x80 ; /
+005D 3438           00262         RETLW 0x38 ; 0
+005E 3430           00263         RETLW 0x30 ; 1
+005F 3459           00264         RETLW 0x59 ; 2
+0060 3479           00265         RETLW 0x79 ; 3
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE  6
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0061 3471           00266         RETLW 0x71 ; 4
+0062 3469           00267         RETLW 0x69 ; 5
+0063 3469           00268         RETLW 0x69 ; 6
+0064 3430           00269         RETLW 0x30 ; 7
+0065 3479           00270         RETLW 0x79 ; 8
+0066 3479           00271         RETLW 0x79 ; 9
+0067 3409           00272         RETLW 0x09 ; :
+0068 3400           00273         RETLW 0x00 ;  ;
+0069 3482           00274         RETLW 0x82 ; <
+006A 3449           00275         RETLW 0x49 ; =
+006B 3400           00276         RETLW 0x00 ; >
+006C 3415           00277         RETLW 0x15 ; ?
+006D 3400           00278         RETLW 0x00 ; @
+006E 3471           00279         RETLW 0x71 ; A
+006F 343D           00280         RETLW 0x3D ; B
+0070 3408           00281         RETLW 0x08 ; C
+0071 343C           00282         RETLW 0x3C ; D
+0072 3448           00283         RETLW 0x48 ; E
+0073 3440           00284         RETLW 0x40 ; F
+0074 3429           00285         RETLW 0x29 ; G
+0075 3471           00286         RETLW 0x71 ; H
+0076 340C           00287         RETLW 0x0C ; I
+0077 3404           00288         RETLW 0x04 ; J
+0078 34C2           00289         RETLW 0xC2 ; K
+0079 3408           00290         RETLW 0x08 ; L
+007A 34B0           00291         RETLW 0xB0 ; M
+007B 3432           00292         RETLW 0x32 ; N
+007C 3438           00293         RETLW 0x38 ; O
+007D 3451           00294         RETLW 0x51 ; P
+007E 343A           00295         RETLW 0x3A ; Q
+007F 3453           00296         RETLW 0x53 ; R
+0080 3469           00297         RETLW 0x69 ; S
+0081 3404           00298         RETLW 0x04 ; T
+0082 3438           00299         RETLW 0x38 ; U
+0083 3480           00300         RETLW 0x80 ; V
+0084 3432           00301         RETLW 0x32 ; W
+0085 3482           00302         RETLW 0x82 ; X
+0086 3484           00303         RETLW 0x84 ; Y
+0087 3488           00304         RETLW 0x88 ; Z
+0088 340C           00305         RETLW 0x0C ; [
+0089 3402           00306         RETLW 0x02 ; \
+008A 3404           00307         RETLW 0x04 ; ]
+008B 3490           00308         RETLW 0x90 ; ^
+008C 3408           00309         RETLW 0x08 ; _
+008D 3400           00310         RETLW 0x00 ; `
+008E 3400           00311         RETLW 0x00 ; `
+008F 3400           00312         RETLW 0x00 ; `
+0090                00313 Itext:
+0090 0782           00314         ADDWF   _pcl,f
+                    00315 ; dt 'S','U','O','R','A','A','N',' ','S','U','O','M','E','S','T','A','.',0
+0091 344E 344F 3420 00316         dt 'N','O',' ','E','N','T','R','Y',' ','*','*','S','T','O','P','*','*',0
+     3445 344E 3454 
+     3452 3459 3420 
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE  7
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+     342A 342A 3453 
+     3454 344F 3450 
+     342A 342A 3400 
+                    00317 
+00A3                00318 TurnText:
+00A3 0782           00319         ADDWF   _pcl,f
+00A4 3420 3454 3455 00320         dt ' ','T','U','R','N',' ',0
+     3452 344E 3420 
+     3400 
+00AB                00321 LeftText:
+00AB 0782           00322         ADDWF   _pcl,f
+00AC 344C 3445 3446 00323         dt 'L','E','F','T',' ',0
+     3454 3420 3400 
+00B2                00324 RightText:
+00B2 0782           00325         ADDWF   _pcl,f
+00B3 3452 3449 3447 00326         dt 'R','I','G','H','T',' ',0
+     3448 3454 3420 
+     3400 
+                    00327 
+00BA 216F           00328 GPS4:   Call    ClrSeg
+00BB 0820           00329         movfw   MitaTehda
+00BC 0AA0           00330         incf    MitaTehda,F
+00BD 0782           00331         addwf   _pcl,f
+00BE 2930           00332         goto    Kaanny
+00BF 2920           00333         goto    MinneMennaan
+00C0 291D           00334         goto    MatkaaJaljella
+00C1 291A           00335         goto    Suunta
+00C2 01A0           00336         clrf    MitaTehda
+00C3 01A0           00337         clrf    MitaTehda
+00C4 01A0           00338         clrf    MitaTehda
+00C5 2903           00339         goto    GPSEnd
+                    00340 
+                    00341 
+00C6                00342 Start:
+00C6 222F           00343         call    InitSerialPort
+00C7 1683           00344         Bank_1
+00C8 1005           00345         bcf     SEG_CLK
+00C9 1085           00346         bcf     SEG_DATA
+00CA 1105           00347         bcf     BLINK
+00CB 1283           00348         Bank_0
+00CC 1105           00349         bcf     BLINK
+00CD 3028           00350         movlw   0x28
+00CE 009A           00351         movwf   NytNaytossa
+00CF 01A0           00352         clrf    MitaTehda
+                    00353         Print 'a'
+00D0 3061               M         movlw   'a'
+00D1 21F6               M         call    PutWChar
+00D2                00354 WaitForNextSel:
+00D2 216F           00355         call    ClrSeg
+00D3 2183           00356         Call    InitText
+00D4 20D9           00357         call    crlf
+                    00358         Print   '?'
+00D5 303F               M         movlw   '?'
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE  8
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+00D6 21F6               M         call    PutWChar
+00D7 21FB           00359         call    GetWChar ; wait for a byte reception
+00D8 28DE           00360         goto    BEE
+                    00361 
+                    00362 crlf:   Print   13
+00D9 300D               M         movlw   13
+00DA 21F6               M         call    PutWChar
+                    00363         Print   10
+00DB 300A               M         movlw   10
+00DC 21F6               M         call    PutWChar
+00DD 0008           00364         return
+                    00365 
+00DE 21FB           00366 BEE:    call    GetWChar ; wait for a byte reception
+                    00367         GotoIfEqual RxReg,10,GPS
+00DF 080D               M         movfw   RxReg
+00E0 3C0A               M         sublw   10
+00E1 1903               M         SkipIfNotZero
+00E2 28FD               M         goto    GPS
+00E3 080D           00368         movfw   RxReg
+00E4 20E6           00369         Call    SegChar
+00E5 28DE           00370         goto    BEE
+                    00371 
+00E6                00372 SegChar:
+00E6 009E           00373         movwf   Roska
+                    00374         GotoIfEqual Roska,'.',SegPiste
+00E7 081E               M         movfw   Roska
+00E8 3C2E               M         sublw   '.'
+00E9 1903               M         SkipIfNotZero
+00EA 28FA               M         goto    SegPiste
+00EB 3029           00375         movlw   0x29
+00EC 0084           00376         movwf   _fsr
+00ED 0800           00377 BEE2:   movfw   _indf
+00EE 0384           00378         decf    _fsr,F
+00EF 0080           00379         movwf   _indf
+00F0 0A84           00380         incf    _fsr,F
+00F1 0A84           00381         incf    _fsr,F
+                    00382         GotoIfEqual _fsr,0x30,BEEL
+00F2 0804               M         movfw   _fsr
+00F3 3C30               M         sublw   0x30
+00F4 1903               M         SkipIfNotZero
+00F5 28F7               M         goto    BEEL
+00F6 28ED           00383         goto    BEE2
+00F7 081E           00384 BEEL:   movfw   Roska
+00F8 00AF           00385         movwf   0x2F
+00F9 0008           00386         return
+00FA                00387 SegPiste:
+00FA 3080           00388         movlw   0x80
+00FB 04AF           00389         iorwf   0x2F,F
+00FC 0008           00390         return
+                    00391 
+00FD 21FB           00392 GPS:    call    GetWChar
+                    00393         GotoIfEqual RxReg,'$',GPS2
+00FE 080D               M         movfw   RxReg
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE  9
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+00FF 3C24               M         sublw   '$'
+0100 1903               M         SkipIfNotZero
+0101 290A               M         goto    GPS2
+0102 28DE           00394         Goto    BEE
+                    00395 
+0103 1505           00396 GPSEnd: bsf     BLINK
+0104 21FB           00397         call    GetWChar
+                    00398         GotoIfEqual RxReg,'$',GPS2
+0105 080D               M         movfw   RxReg
+0106 3C24               M         sublw   '$'
+0107 1903               M         SkipIfNotZero
+0108 290A               M         goto    GPS2
+0109 2903           00399         Goto    GPSEnd
+                    00400 
+010A 1105           00401 GPS2:   bcf     BLINK
+010B 2203           00402         call    GetWHeti
+                    00403         GotoIfEqual RxReg,'G',GPS3
+010C 080D               M         movfw   RxReg
+010D 3C47               M         sublw   'G'
+010E 1903               M         SkipIfNotZero
+010F 2911               M         goto    GPS3
+0110 2903           00404         goto    GPSEnd
+0111 2203           00405 GPS3:   call    GetWHeti ; P
+0112 2203           00406         call    GetWHeti ; R
+0113 2203           00407         call    GetWHeti ; M
+0114 2203           00408         call    GetWHeti ; 
+                    00409         GotoIfEqual RxReg,'B',GPS4
+0115 080D               M         movfw   RxReg
+0116 3C42               M         sublw   'B'
+0117 1903               M         SkipIfNotZero
+0118 28BA               M         goto    GPS4
+0119 2903           00410         goto    GPSEnd
+                    00411 
+011A                00412 Suunta:
+011A 300B           00413         movlw   11
+011B 2167           00414         call    Pilkkuja
+011C 2922           00415         goto    CopyToPilkku
+                    00416 
+011D                00417 MatkaaJaljella:
+011D 300A           00418         movlw   10
+011E 2167           00419         call    Pilkkuja
+011F 2922           00420         goto    CopyToPilkku
+0120                00421 MinneMennaan:
+0120 3005           00422         movlw   5
+0121 2167           00423         call    Pilkkuja
+0122                00424 CopyToPilkku:
+0122 3020           00425         movlw   ' '
+0123 00A1           00426         movwf   Paska
+0124 2265           00427 TOP1:   call    GetChar ; wait for a byte reception
+0125 0821           00428         movfw   Paska
+0126 20E6           00429         call    SegChar
+0127 198F           00430 TOP2:   btfsc   _rcvOver ;
+0128 2927           00431         goto    TOP2
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 10
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                    00432         GotoIfEqual RxReg,',',GPSEnd
+0129 080D               M         movfw   RxReg
+012A 3C2C               M         sublw   ','
+012B 1903               M         SkipIfNotZero
+012C 2903               M         goto    GPSEnd
+012D 080D           00433         movfw   RxReg
+012E 00A1           00434         movwf   Paska
+012F 2924           00435         goto    TOP1
+                    00436 
+0130                00437 Kaanny:
+0130 3003           00438         movlw   3
+0131 2167           00439         call    Pilkkuja
+0132 2203           00440         call    GetWHeti
+0133 1505           00441         bsf     BLINK
+                    00442         GotoIfEqual RxReg,'L',Left
+0134 080D               M         movfw   RxReg
+0135 3C4C               M         sublw   'L'
+0136 1903               M         SkipIfNotZero
+0137 2952               M         goto    Left
+                    00443         GotoIfEqual RxReg,'R',Right
+0138 080D               M         movfw   RxReg
+0139 3C52               M         sublw   'R'
+013A 1903               M         SkipIfNotZero
+013B 293D               M         goto    Right
+013C 2903           00444         goto    GPSEnd
+                    00445 
+                    00446 Right:  prints  TurnText
+  0000                  M         local   pr2,Ohion
+013D 019F               M         clrf    StrOsoite
+013E 081F               M pr2:    movfw   StrOsoite
+013F 0A9F               M         incf    StrOsoite,F
+0140 20A3               M         call    TurnText
+0141 3800               M         iorlw   0
+0142 1903               M         SkipIfNotZero
+0143 2947               M         goto    Ohion
+0144 20E6               M         call    SegChar
+0145 2178               M         call    Delay
+0146 293E               M         goto    pr2
+0147                    M Ohion:
+                    00447         prints  RightText
+  0000                  M         local   pr2,Ohion
+0147 019F               M         clrf    StrOsoite
+0148 081F               M pr2:    movfw   StrOsoite
+0149 0A9F               M         incf    StrOsoite,F
+014A 20B2               M         call    RightText
+014B 3800               M         iorlw   0
+014C 1903               M         SkipIfNotZero
+014D 2951               M         goto    Ohion
+014E 20E6               M         call    SegChar
+014F 2178               M         call    Delay
+0150 2948               M         goto    pr2
+0151                    M Ohion:
+0151 2903           00448         goto    GPSEnd
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 11
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                    00449 Left:   prints  TurnText
+  0000                  M         local   pr2,Ohion
+0152 019F               M         clrf    StrOsoite
+0153 081F               M pr2:    movfw   StrOsoite
+0154 0A9F               M         incf    StrOsoite,F
+0155 20A3               M         call    TurnText
+0156 3800               M         iorlw   0
+0157 1903               M         SkipIfNotZero
+0158 295C               M         goto    Ohion
+0159 20E6               M         call    SegChar
+015A 2178               M         call    Delay
+015B 2953               M         goto    pr2
+015C                    M Ohion:
+                    00450         prints  LeftText
+  0000                  M         local   pr2,Ohion
+015C 019F               M         clrf    StrOsoite
+015D 081F               M pr2:    movfw   StrOsoite
+015E 0A9F               M         incf    StrOsoite,F
+015F 20AB               M         call    LeftText
+0160 3800               M         iorlw   0
+0161 1903               M         SkipIfNotZero
+0162 2966               M         goto    Ohion
+0163 20E6               M         call    SegChar
+0164 2178               M         call    Delay
+0165 295D               M         goto    pr2
+0166                    M Ohion:
+0166 2903           00451         goto    GPSEnd
+                    00452 
+                    00453 
+0167                00454 Pilkkuja:
+0167 009E           00455         movwf   Roska
+0168 2203           00456 Kuja2:  call    GetWHeti
+0169 3A2C           00457         xorlw   ','
+016A 1D03           00458         SkipIfZero
+016B 2968           00459         goto    Kuja2
+016C 0B9E           00460         decfsz  Roska,F
+016D 2968           00461         goto    Kuja2
+016E 0008           00462         return
+                    00463 
+016F                00464 ClrSeg:
+016F 01A8           00465         clrf    K0
+0170 01A9           00466         clrf    K1
+0171 01AA           00467         clrf    K2
+0172 01AB           00468         clrf    K3
+0173 01AC           00469         clrf    K4
+0174 01AD           00470         clrf    K5
+0175 01AE           00471         clrf    K6
+0176 01AF           00472         clrf    K7
+0177 0008           00473         return
+                    00474 
+                    00475 
+0178 019B           00476 Delay:  clrf    Viivahdys
+0179 019C           00477         clrf    Viiva2
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 12
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+017A 019D           00478         clrf    Viiva3
+017B 0F9B           00479 Dela2:  incfsz  Viivahdys,F
+017C 297B           00480         goto    Dela2
+017D 0F9C           00481         incfsz  Viiva2,F
+017E 2981           00482         goto    Dela3
+017F 0F9D           00483         incfsz  Viiva3,F
+0180 0008           00484         return
+0181 219A           00485 Dela3:  call    Jatkuva
+0182 297B           00486         goto    Dela2
+                    00487 
+0183                00488 InitText:
+                    00489         prints  Itext
+  0000                  M         local   pr2,Ohion
+0183 019F               M         clrf    StrOsoite
+0184 081F               M pr2:    movfw   StrOsoite
+0185 0A9F               M         incf    StrOsoite,F
+0186 2090               M         call    Itext
+0187 3800               M         iorlw   0
+0188 1903               M         SkipIfNotZero
+0189 298D               M         goto    Ohion
+018A 20E6               M         call    SegChar
+018B 2178               M         call    Delay
+018C 2984               M         goto    pr2
+018D                    M Ohion:
+018D 0008           00490         return
+                    00491 
+                    00492 
+018E                00493 SendByte:
+018E 0098           00494         movwf   tempo 
+018F 3008           00495         movlw   8
+0190 0099           00496         movwf   counter
+0191                00497 sb2:
+0191 1485           00498         bsf     SEG_DATA
+0192 0D98           00499         rlf     tempo,F
+0193 1803           00500         SkipIfNotCarry
+0194 1085           00501         bcf     SEG_DATA
+0195 1405           00502         bsf     SEG_CLK
+0196 1005           00503         bcf     SEG_CLK
+0197 0B99           00504         decfsz  counter,F
+0198 2991           00505         goto    sb2
+0199 0008           00506         return
+                    00507 
+                    00508         CBLOCK 0x28
+  00000028          00509         K0,K1,K2,K3,K4,K5,K6,K7
+                    00510         ENDC
+                    00511 
+019A                00512 Jatkuva:
+019A 1105           00513         bcf     BLINK
+019B 081A           00514         movfw   NytNaytossa
+019C 0084           00515         movwf   _fsr
+019D 0800           00516         movfw   _indf
+019E 2005           00517         call    ekaseg
+019F 218E           00518         call    SendByte        
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 13
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+01A0 0800           00519         movfw   _indf
+01A1 204A           00520         call    tokaseg
+01A2 218E           00521         call    SendByte
+01A3 0800           00522         movfw   _indf
+01A4 1584           00523         bsf     _fsr,3
+01A5 3980           00524         andlw   0x80
+01A6 1D03           00525         SkipIfZero
+01A7 1184           00526         bcf     _fsr,3
+01A8 30F0           00527         movlw   0xF0
+01A9 0404           00528         iorwf   _fsr,w
+01AA 3AFF           00529         xorlw   0xFF
+01AB 218E           00530         call    SendByte
+01AC 1505           00531         bsf     BLINK
+01AD 0A9A           00532         incf    NytNaytossa,F
+01AE 081A           00533         movfw   NytNaytossa
+01AF 3C30           00534         sublw   0x30
+01B0 1D03           00535         SkipIfZero
+01B1 0008           00536         return
+01B2 3028           00537         movlw   0x28
+01B3 009A           00538         movwf   NytNaytossa
+01B4 0008           00539         return
+                    00540 
+                    00541 
+                    00542         
+                    00543 ;--------------
+01B5                00544 DispHex:
+01B5 0096           00545         movwf   LSD
+01B6 0E16           00546         swapf   LSD,w
+01B7 21B9           00547         call    DispHexNyb
+01B8 0816           00548         movfw   LSD
+01B9                00549 DispHexNyb:
+01B9 390F           00550         andlw   0xF
+01BA 3C09           00551         sublw   9
+01BB 1C03           00552         SkipIfCarry
+01BC 29C0           00553         goto    YliYheksan
+01BD 3C09           00554         sublw   9
+01BE 3E30           00555         addlw   0x30
+01BF 29F6           00556         goto    PutWChar
+01C0                00557 YliYheksan:
+01C0 3C09           00558         sublw   9
+01C1 3E37           00559         addlw   'A'-10
+01C2 29F6           00560         goto    PutWChar
+                    00561 
+01C3 21C9           00562 GetHex: call    GetHexNyb
+01C4 0096           00563         movwf   LSD
+01C5 0E96           00564         swapf   LSD,f
+01C6 21C9           00565         call    GetHexNyb
+01C7 0716           00566         addwf   LSD,w
+01C8 0008           00567         return
+01C9                00568 GetHexNyb:
+01C9 21FB           00569         Call    GetWChar
+01CA 3C2F           00570         sublw   '0'-1
+01CB 1803           00571         SkipIfNotCarry
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 14
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+01CC 29C9           00572         goto    GetHexNyb
+01CD 3C2F           00573         sublw   '0'-1
+01CE 3C39           00574         sublw   '9'
+01CF 1C03           00575         SkipIfCarry
+01D0 29D4           00576         goto    YliY2
+01D1 3C39           00577         sublw   '9'
+01D2 390F           00578         andlw   0xF
+01D3 0008           00579         return
+01D4 3C39           00580 YliY2:  sublw   '9'
+01D5 390F           00581         andlw   0xF
+01D6 3E09           00582         addlw   10-1
+01D7 0008           00583         return
+                    00584 
+01D8                00585 GetDecimal:
+01D8 21E3           00586         Call    GetNum
+01D9 0097           00587         movwf   MSD
+01DA 1003           00588         bcf     _carry
+01DB 0D97           00589         rlf     MSD,F
+01DC 0D97           00590         rlf     MSD,F
+01DD 0D97           00591         rlf     MSD,F
+01DE 0797           00592         addwf   MSD,F
+01DF 0797           00593         addwf   MSD,F
+01E0 21E3           00594         Call    GetNum
+01E1 0717           00595         addwf   MSD,W
+01E2 0008           00596         return
+                    00597 
+01E3 21FB           00598 GetNum  call    GetWChar
+01E4 3ED0           00599         addlw   -0x30
+01E5 0008           00600         return
+                    00601 
+01E6                00602 DispDeci:
+01E6 0197           00603         clrf    MSD
+01E7 0096           00604         movwf   LSD
+01E8 300A           00605 gtenth  movlw   10
+01E9 0216           00606         subwf   LSD,W
+01EA 1C03           00607         SkipIfCarry
+01EB 29EF           00608         goto    over
+01EC 0096           00609         movwf   LSD
+01ED 0A97           00610         incf    MSD,F
+01EE 29E8           00611         goto    gtenth
+01EF 0817           00612 over    movfw   MSD
+01F0 3E30           00613         addlw   0x30
+01F1 21F6           00614         Call    PutWChar
+01F2 0816           00615         movfw   LSD
+01F3 3E30           00616         addlw   0x30
+01F4 21F6           00617         Call    PutWChar
+01F5 0008           00618         return
+                    00619 
+                    00620 ;
+01F6                00621 PutWChar:
+01F6 008C           00622         movwf   TxReg
+01F7 2236           00623         call    Printhar
+01F8 180F           00624 Venaa2: btfsc   _txmtProgress
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 15
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+01F9 29F8           00625         goto    Venaa2 ; Loop Until Transmission Over, User Can Perform 
+01FA 0008           00626         return
+                    00627 
+01FB                00628 GetWChar:
+01FB 2265           00629         call    GetChar ; wait for a byte reception
+01FC 0F9B           00630 Venaa:  incfsz  Viivahdys,F
+01FD 29FF           00631         goto    venaa2
+01FE 219A           00632         call    Jatkuva
+01FF 198F           00633 venaa2: btfsc   _rcvOver ;
+0200 29FC           00634         goto    Venaa
+0201 080D           00635         movf    RxReg,W
+0202 0008           00636         return
+                    00637 
+0203                00638 GetWHeti:
+0203 2265           00639         call    GetChar ; wait for a byte reception
+0204 198F           00640 Wheti2: btfsc   _rcvOver ;
+0205 2A04           00641         goto    Wheti2
+0206 080D           00642         movf    RxReg,W
+0207 0008           00643         return
+                    00644 
+0208                00645 EeRead: ; address in W -> W
+0208 0089           00646         movwf   _eeadr
+0209 220C           00647         call    EeReadFast
+020A 0808           00648         movfw   _eedata
+020B 0008           00649         return
+020C                00650 EeReadFast:
+020C 1683           00651         Bank_1
+020D 1408           00652         bsf     _rd
+020E 1283           00653         Bank_0
+020F 0008           00654         return
+                    00655 
+0210 1683           00656 EeWrite:Bank_1
+0211 138B           00657         bcf     _gie
+0212 1508           00658         bsf     _wren
+0213 3055           00659         movlw   0x55
+0214 0089           00660         movwf   _eecon2
+0215 30AA           00661         movlw   0xAA
+0216 0089           00662         movwf   _eecon2
+0217 1488           00663         bsf     _wr
+0218 1E08           00664         btfss   _eeif
+0219 2A18           00665         goto    $-1
+021A 1208           00666         bcf     _eeif
+021B 178B           00667         bsf     _gie
+021C 1108           00668         bcf     _wren
+021D 1283           00669         Bank_0
+021E 0008           00670         return
+                    00671 
+                    00672 ;
+                    00673 ;***********************************************
+                    00674 ; Setup RS-232 Parameters
+                    00675 ;***********************************************
+                    00676 
+                    00677 
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 16
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+  003D0900          00678 _ClkIn  equ     4000000 ; Input Clock Frequency is 4 Mhz
+  000012C0          00679 _BaudRate       set     4800 ; Baud Rate (bits per second) is 1200
+  00000008          00680 _DataBits       set     8 ; 8 bit data, can be 1 to 8
+  00000001          00681 _StopBits       set     1 ; 1 Stop Bit, 2 Stop Bits is not implemented
+                    00682 
+                    00683 #define _PARITY_ENABLE  FALSE ; NO Parity
+                    00684 #define _ODD_PARITY     FALSE ; EVEN Parity, if Parity enabled
+                    00685 #define _USE_RTSCTS     FALSE ; NO Hardware Handshaking is Used
+                    00686 
+  000F4240          00687 _ClkOut equ     (_ClkIn >> 2)   ; Instruction Cycle Freq = CLKIN/4 
+                    00688 ;
+                    00689 
+  000000D0          00690 _CyclesPerBit   set     (_ClkOut/_BaudRate)
+  00000000          00691 _tempCompute    set     (_CyclesPerBit >> 8)
+                    00692 
+  00000000          00693 RtccPrescale    set     0
+  000000D0          00694 RtccPreLoad     set     _CyclesPerBit
+  00000000          00695 UsePrescale     set     FALSE
+                    00696 
+                    00697  if (_tempCompute >= 1)
+                    00698 RtccPrescale    set     0
+                    00699 RtccPreLoad     set     (_CyclesPerBit >> 1)
+                    00700 
+                    00701 UsePrescale     set     TRUE
+                    00702  endif
+                    00703 
+                    00704  if (_tempCompute >= 2)
+                    00705 RtccPrescale    set     1
+                    00706 RtccPreLoad     set     (_CyclesPerBit >> 2)
+                    00707  endif
+                    00708 
+                    00709  if (_tempCompute >= 4)
+                    00710 RtccPrescale    set     2
+                    00711 RtccPreLoad     set     (_CyclesPerBit >> 3)
+                    00712  endif
+                    00713 
+                    00714  if (_tempCompute >= 8)
+                    00715 RtccPrescale    set     3
+                    00716 RtccPreLoad     set     (_CyclesPerBit >> 4)
+                    00717  endif
+                    00718 
+                    00719  if (_tempCompute >= 16)
+                    00720 RtccPrescale    set     4
+                    00721 RtccPreLoad     set     (_CyclesPerBit >> 5)
+                    00722  endif
+                    00723 
+                    00724  if (_tempCompute >= 32)
+                    00725 RtccPrescale    set     5
+                    00726 RtccPreLoad     set     (_CyclesPerBit >> 6)
+                    00727  endif
+                    00728  
+                    00729  if (_tempCompute >= 64)
+                    00730 RtccPrescale    set     6
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 17
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                    00731 RtccPreLoad     set     (_CyclesPerBit >> 7)
+                    00732  endif
+                    00733 
+                    00734  if   (_tempCompute >= 128)
+                    00735 RtccPrescale    set     7
+                    00736 RtccPreLoad     set     (_CyclesPerBit >> 8)
+                    00737  endif
+                    00738 
+                    00739      if( (RtccPrescale == 0) && (RtccPreLoad < 60))
+                    00740         messg   "Warning : Baud Rate May Be Too High For This Input Clock"
+                    00741      endif
+                    00742 ;
+                    00743 ; Compute RTCC & Presclaer Values For 1.5 Times the Baud Rate for Start Bit Detection
+                    00744 ;
+                    00745 
+  00000104          00746 _SBitCycles     set     (_ClkOut/_BaudRate) + ((_ClkOut/4)/_BaudRate)
+  00000001          00747 _tempCompute    set     (_SBitCycles >> 8)
+                    00748 
+  00000008          00749 _BIT1_INIT      set     08
+  00000000          00750 SBitPrescale    set     0
+  00000104          00751 SBitRtccLoad    set     _SBitCycles
+                    00752 
+                    00753 
+                    00754  if (_tempCompute >= 1)
+  00000000          00755 SBitPrescale    set     0
+  00000082          00756 SBitRtccLoad    set     (_SBitCycles >> 1)
+  00000000          00757 _BIT1_INIT      set     0
+                    00758  endif
+                    00759 
+                    00760  if (_tempCompute >= 2)
+                    00761 SBitPrescale    set     1
+                    00762 SBitRtccLoad    set     (_SBitCycles >> 2)
+                    00763  endif
+                    00764 
+                    00765  if (_tempCompute >= 4)
+                    00766 SBitPrescale    set     2
+                    00767 SBitRtccLoad    set     (_SBitCycles >> 3)
+                    00768  endif
+                    00769 
+                    00770  if (_tempCompute >= 8)
+                    00771 SBitPrescale    set     3
+                    00772 SBitRtccLoad    set     (_SBitCycles >> 4)
+                    00773  endif
+                    00774 
+                    00775 
+                    00776  if (_tempCompute >= 16)
+                    00777 SBitPrescale    set     4
+                    00778 SBitRtccLoad    set     (_SBitCycles >> 5)
+                    00779  endif
+                    00780 
+                    00781 
+                    00782  if (_tempCompute >= 32)
+                    00783 SBitPrescale    set     5
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 18
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                    00784 SBitRtccLoad    set     (_SBitCycles >> 6)
+                    00785  endif
+                    00786 
+                    00787 
+                    00788  if (_tempCompute >= 64)
+                    00789 SBitPrescale    set     6
+                    00790 SBitRtccLoad    set     (_SBitCycles >> 7)
+                    00791  endif
+                    00792 
+                    00793 
+                    00794  if   (_tempCompute >= 128)
+                    00795 SBitPrescale    set     7
+                    00796 SBitRtccLoad    set     (_SBitCycles >> 8)
+                    00797  endif
+                    00798 
+                    00799 
+                    00800 #define _Cycle_Offset1  24      ;account for interrupt latency, call time
+                    00801 
+                    00802 LOAD_RTCC       MACRO   Mode, K, Prescale
+                    00803 
+                    00804     if(UsePrescale == 0 && Mode == 0)
+                    00805         movlw   -K + _Cycle_Offset1
+                    00806     else
+                    00807         movlw   -K + (_Cycle_Offset1 >> (Prescale+1))  ; Re Load RTCC init value + INT Latency Offset
+                    00808     endif
+                    00809         movwf   _rtcc   ; Note that Prescaler is cleared when RTCC is written
+                    00810 
+                    00811         ENDM
+                    00812 
+                    00813 LOAD_BITCOUNT   MACRO
+                    00814 
+                    00815         movlw   _DataBits+1
+                    00816         movwf   BitCount
+                    00817         movlw   1
+                    00818         movwf   ExtraBitCount   
+                    00819 
+                    00820         ENDM
+                    00821 ;
+                    00822 
+  00000028          00823 _OPTION_SBIT    set     0x28 ; nokowas 0x38
+                    00824         ; Increment on Ext Clock (falling edge), for START Bit Detect
+                    00825 
+                    00826   if UsePrescale
+                    00827 _OPTION_INIT    set     0x00
+                    00828         ; Prescaler is used depending on Input Clock & Baud Rate
+                    00829   else
+  0000000F          00830 _OPTION_INIT    set     0x0F
+                    00831   endif
+                    00832 
+                    00833 ;***********************************************
+                    00834 
+021F                00835 Interrupt:
+021F 1D0B           00836         btfss   _rtif
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 19
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0220 0009           00837         retfie ; other interrupt, simply return & enable GIE
+                    00838 ;
+                    00839 ; Save Status On INT : WREG & STATUS Regs
+                    00840 ;
+0221 0092           00841         movwf   SaveWReg
+0222 0E03           00842         swapf   _status,w ; affects no STATUS bits : Only way OUT to save STATUS Reg ?????
+0223 0093           00843         movwf   SaveStatus
+                    00844 ;
+0224 180F           00845         btfsc   _txmtProgress
+0225 2A40           00846         goto    _TxmtNextBit ; Txmt Next Bit
+0226 190F           00847         btfsc   _rcvProgress
+0227 2A85           00848         goto    _RcvNextBit ; Receive Next Bit
+0228 2A77           00849         goto    _SBitDetected ; Must be start Bit       
+                    00850 ;
+0229                00851 RestoreIntStatus:
+0229 0E13           00852         swapf   SaveStatus,w
+022A 0083           00853         movwf   _status ; restore STATUS Reg
+022B 0E92           00854         swapf   SaveWReg, F ; save WREG
+022C 0E12           00855         swapf   SaveWReg,w ; restore WREG
+022D 110B           00856         bcf     _rtif
+022E 0009           00857         retfie
+                    00858 ;
+                    00859 ;***********************************************
+                    00860 
+                    00861         
+022F                00862 InitSerialPort:
+022F 018F           00863         clrf    SerialStatus
+                    00864 ;
+0230 1283           00865         Bank_0 ; select Page 0 for Port Access
+0231 1185           00866         bcf     TX ; make sure TX Pin is high on powerup, use RB Port Pullup    
+0232 1683           00867         Bank_1 ; Select Page 1 for TrisB access
+0233 1185           00868         bcf     TX ; set TX Pin As Output Pin, by modifying TRIS
+0234 1605           00869         bsf     RX_Pin ; set RX Pin As Input for reception
+0235 0008           00870         return
+                    00871 ;
+                    00872 ;**********************************************************************
+                    00873 
+0236                00874 Printhar:
+0236 148F           00875         bsf     _txmtEnable     ; enable transmission
+0237 140F           00876         bsf     _txmtProgress
+                    00877         LOAD_BITCOUNT   ; Macro to load bit count
+                        M 
+0238 3009               M         movlw   _DataBits+1
+0239 0090               M         movwf   BitCount
+023A 3001               M         movlw   1
+023B 0091               M         movwf   ExtraBitCount   
+                        M 
+023C 0390           00878         decf    BitCount,1
+                    00879 ;
+023D 225C           00880         call    _TxmtStartBit
+023E 168B           00881         bsf     _rtie   ; Enable RTCC Overflow INT
+023F 0009           00882         retfie          ; return with _GIE Bit Set
+                    00883 ;
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 20
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                    00884 ;**********************************************************************
+                    00885 
+                    00886 
+0240                00887 _TxmtNextBit:
+0240 1283           00888         Bank_0
+                    00889         LOAD_RTCC  0,RtccPreLoad, RtccPrescale  ; Macro to reload RTCC
+                        M 
+                        M     if(UsePrescale == 0 && 0    == 0)
+0241 3048               M         movlw   -RtccPreLoad + _Cycle_Offset1
+                        M     else
+                        M         movlw   -RtccPreLoad + (_Cycle_Offset1 >> (RtccPrescale+1)) ; Re Load RTCC init value + INT Latenc
+                          y Offset
+                        M     endif
+0242 0081               M         movwf   _rtcc   ; Note that Prescaler is cleared when RTCC is written
+                        M 
+                    00890 ;
+0243 0890           00891         movf    BitCount, F     ;done with data xmission?
+0244 1903           00892         SkipIfNotZero
+0245 2A48           00893         goto    _ParityOrStop   ;yes, do parity or stop bit
+                    00894 ;
+0246 0390           00895         decf    BitCount, F
+0247 2A4F           00896         goto    _NextTxmtBit    ;no, send another
+                    00897 ;
+0248                00898 _ParityOrStop:
+0248 0891           00899         movf    ExtraBitCount,1 ;check if sending stop bit
+0249 1903           00900         SkipIfNotZero
+024A 2A58           00901         goto    DoneTxmt
+024B 0391           00902         decf    ExtraBitCount,1
+                    00903 ;
+024C                00904 _StopBit:
+024C 1185           00905         bcf     TX      ; STOP Bit is High
+024D 2A29           00906         goto    RestoreIntStatus
+024E 2A58           00907         goto    DoneTxmt
+                    00908 ;
+024F                00909 _NextTxmtBit:
+024F 1403           00910         bsf     _carry
+0250 0C8C           00911         rrf     TxReg, F
+0251 1C03           00912         SkipIfCarry
+0252 1585           00913         bsf     TX
+0253 1803           00914         SkipIfNotCarry
+0254 1185           00915         bcf     TX
+                    00916 ;
+0255 1C8F           00917         btfss   _txmtEnable
+0256 168B           00918         bsf     _rtie   ; disable further interrupts, Transmission Aborted      
+                    00919 ;
+0257 2A29           00920         goto    RestoreIntStatus
+                    00921 ;
+                    00922 
+0258                00923 DoneTxmt
+0258 1185           00924         bcf     TX      ;STOP Bit is High
+0259 128B           00925         bcf     _rtie   ;disable further interrupts
+025A 100F           00926         bcf     _txmtProgress   ;indicates end of xmission
+025B 2A29           00927         goto    RestoreIntStatus
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 21
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                    00928 ;
+                    00929 ;**********************************************************************
+                    00930 
+025C                00931 _TxmtStartBit:
+025C 1683           00932         Bank_1
+025D 300F           00933         movlw   (_OPTION_INIT | RtccPrescale)
+025E 0081           00934         movwf   _option ; Set Option Reg Located In Page 1
+025F 1283           00935         Bank_0  ; make sure to select Page 0
+0260 1585           00936         bsf     TX      ; Send Start Bit
+0261 3030           00937         movlw   -RtccPreLoad    ; Prepare for Timing Interrupt
+0262 0081           00938         movwf   _rtcc
+0263 110B           00939         bcf     _rtif
+0264 0008           00940         return
+                    00941 
+                    00942 ;**********************************************************************
+                    00943 ;************************************************************
+0265                00944 GetChar:
+0265 1283           00945         Bank_0
+0266 158F           00946         bsf     _rcvOver        ; Enable Reception, this bit gets reset on Byte Rcv Complete
+                    00947         LOAD_BITCOUNT
+                        M 
+0267 3009               M         movlw   _DataBits+1
+0268 0090               M         movwf   BitCount
+0269 3001               M         movlw   1
+026A 0091               M         movwf   ExtraBitCount   
+                        M 
+026B 018D           00948         clrf    RxReg
+026C 128F           00949         bcf     _FrameErr
+026D 120F           00950         bcf     _ParityErr           ; Init Parity & Framing Errors
+026E 1683           00951         Bank_1
+026F 3028           00952         movlw   _OPTION_SBIT         ; Inc On Ext Clk Falling Edge
+0270 0081           00953         movwf   _option      ; Set Option Reg Located In Page 1
+0271 1283           00954         Bank_0       ; make sure to select Page 0
+0272 30FF           00955         movlw   0xFF
+0273 0081           00956         movwf   _rtcc        ; A Start Bit will roll over RTCC & Gen INT
+0274 110B           00957         bcf     _rtif
+0275 168B           00958         bsf     _rtie        ; Enable RTCC Interrupt
+0276 0009           00959         retfie       ; Enable Global Interrupt
+                    00960 ;
+                    00961 ;************************************************************
+                    00962 
+0277                00963 _SBitDetected:
+0277 1283           00964         Bank_0
+0278 1E05           00965         btfss   RX_Pin  ; nokowas btfsc RX_Pin  
+                    00966            ; Make sure Start Bit Interrupt is not a Glitch
+0279 2A82           00967         goto    _FalseStartBit  ; False Start Bit       
+027A 150F           00968         bsf     _rcvProgress
+027B 1683           00969         Bank_1
+027C 3000           00970         movlw   (_BIT1_INIT | SBitPrescale)     ; Switch Back to INT Clock
+027D 0081           00971         movwf   _option ; Set Option Reg Located In Page 1
+027E 1283           00972         Bank_0  ; make sure to select Page 0
+                    00973         LOAD_RTCC  1,(SBitRtccLoad), SBitPrescale
+                        M 
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 22
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                        M     if(UsePrescale == 0 && 1    == 0)
+                        M         movlw   -(SBitRtccLoad) + _Cycle_Offset1
+                        M     else
+027F 308A               M         movlw   -(SBitRtccLoad) + (_Cycle_Offset1 >> (SBitPrescale+1)) ; Re Load RTCC init value + INT Lat
+                          ency Offset
+                        M     endif
+0280 0081               M         movwf   _rtcc   ; Note that Prescaler is cleared when RTCC is written
+                        M 
+0281 2A29           00974         goto    RestoreIntStatus
+                    00975 ;
+0282                00976 _FalseStartBit:
+0282 30FF           00977         movlw   0xFF
+0283 0081           00978         movwf   _rtcc   ; reload RTCC with 0xFF for start bit detection
+0284 2A29           00979         goto    RestoreIntStatus
+                    00980 ;
+                    00981 ;************************************************************
+                    00982 
+0285                00983 _RcvNextBit:
+0285 1683           00984         Bank_1
+0286 300F           00985         movlw   (_OPTION_INIT | RtccPrescale)   ; Switch Back to INT Clock
+0287 0081           00986         movwf   _option ; Set Option Reg Located In Page 1
+                    00987 ;
+0288 1283           00988         Bank_0
+0289 0805           00989         movf    _porta,w        ; read RX pin immediately into WREG
+028A 008E           00990         movwf   RxTemp
+                    00991         LOAD_RTCC  0,RtccPreLoad, RtccPrescale  ; Macro to reload RTCC
+                        M 
+                        M     if(UsePrescale == 0 && 0    == 0)
+028B 3048               M         movlw   -RtccPreLoad + _Cycle_Offset1
+                        M     else
+                        M         movlw   -RtccPreLoad + (_Cycle_Offset1 >> (RtccPrescale+1)) ; Re Load RTCC init value + INT Latenc
+                          y Offset
+                        M     endif
+028C 0081               M         movwf   _rtcc   ; Note that Prescaler is cleared when RTCC is written
+                        M 
+028D 0805           00992         movf    _porta,w
+028E 060E           00993         xorwf   RxTemp,w
+028F 3910           00994         andlw   RX_MASK ; mask for only RX PIN (RA4)
+0290 1903           00995         SkipIfNotZero
+0291 2A94           00996         goto    _PinSampled     ; both samples are same state
+0292                00997 _SampleAgain:
+0292 0805           00998         movf    _porta,w
+0293 008E           00999         movwf   RxTemp  ; 2 out of 3 majority sampling done
+0294                01000 _PinSampled:
+0294 0890           01001         movf    BitCount,1
+0295 1903           01002         SkipIfNotZero
+0296 2A99           01003         goto    _RcvP_Or_S
+                    01004 ;
+0297 0B90           01005         decfsz  BitCount, F
+0298 2A9F           01006         goto    _NextRcvBit
+                    01007 ;
+0299                01008 _RcvP_Or_S:
+0299                01009 _RcvStopBit:
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 23
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0299 1A0E           01010         btfsc   RX ; nokowas btfss RX
+029A 168F           01011         bsf     _FrameErr       ; may be framing Error or Glitch         
+029B 128B           01012         bcf     _rtie   ; disable further interrupts
+029C 110F           01013         bcf     _rcvProgress
+029D 118F           01014         bcf     _rcvOver        ; Byte Received, Can RCV/TXMT an other Byte
+029E 2A29           01015         goto    RestoreIntStatus
+                    01016 ;
+029F                01017 _NextRcvBit:
+029F 1003           01018         bcf     _carry
+02A0 1E0E           01019         btfss   RX ; nokowas btfsc RX   ; prepare bit for shift
+02A1 1403           01020         bsf     _carry  
+02A2 0C8D           01021         rrf     RxReg, F        ; shift in received data        
+02A3 2A29           01022         goto    RestoreIntStatus
+                    01023 ;
+                    01024 
+                    01025 
+                    01026         END
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 24
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+BEE                               000000DE
+BEE2                              000000ED
+BEEL                              000000F7
+BLINK                             _porta,2
+Bank_0                            bcf _rp0
+Bank_1                            bsf _rp0
+BitCount                          00000010
+ClrSeg                            0000016F
+CopyToPilkku                      00000122
+Dela2                             0000017B
+Dela3                             00000181
+Delay                             00000178
+DispDeci                          000001E6
+DispHex                           000001B5
+DispHexNyb                        000001B9
+DoneTxmt                          00000258
+EeRead                            00000208
+EeReadFast                        0000020C
+EeWrite                           00000210
+ExtraBitCount                     00000011
+FALSE                             00000000
+GPS                               000000FD
+GPS2                              0000010A
+GPS3                              00000111
+GPS4                              000000BA
+GPSEnd                            00000103
+GetChar                           00000265
+GetDecimal                        000001D8
+GetHex                            000001C3
+GetHexNyb                         000001C9
+GetNum                            000001E3
+GetWChar                          000001FB
+GetWHeti                          00000203
+GotoIfEqual                       
+InitSerialPort                    0000022F
+InitText                          00000183
+Interrupt                         0000021F
+Itext                             00000090
+Jatkuva                           0000019A
+K0                                00000028
+K1                                00000029
+K2                                0000002A
+K3                                0000002B
+K4                                0000002C
+K5                                0000002D
+K6                                0000002E
+K7                                0000002F
+Kaanny                            00000130
+Kuja2                             00000168
+LOAD_BITCOUNT                     
+LOAD_RTCC                         
+LSB                               00000000
+LSD                               00000016
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 25
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+Left                              00000152
+LeftText                          000000AB
+MSB                               00000007
+MSD                               00000017
+MatkaaJaljella                    0000011D
+MinneMennaan                      00000120
+MitaTehda                         00000020
+NytNaytossa                       0000001A
+Paska                             00000021
+Pilkkuja                          00000167
+Print                             
+Printhar                          00000236
+PutWChar                          000001F6
+RX                                RxTemp,4
+RX_MASK                           0x10
+RX_Pin                            _porta,4
+RestoreIntStatus                  00000229
+Right                             0000013D
+RightText                         000000B2
+Roska                             0000001E
+RtccPreLoad                       000000D0
+RtccPrescale                      00000000
+RxReg                             0000000D
+RxTemp                            0000000E
+SBitPrescale                      00000000
+SBitRtccLoad                      00000082
+SEG_CLK                           _porta,0
+SEG_DATA                          _porta,1
+SaveStatus                        00000013
+SaveWReg                          00000012
+SegChar                           000000E6
+SegPiste                          000000FA
+SendByte                          0000018E
+SerialStatus                      0000000F
+SkipIfCarry                       btfss _carry
+SkipIfNotCarry                    btfsc _carry
+SkipIfNotZero                     btfsc _z
+SkipIfZero                        btfss _z
+Start                             000000C6
+StrOsoite                         0000001F
+Suunta                            0000011A
+TOP1                              00000124
+TOP2                              00000127
+TRUE                              00000001
+TX                                _porta,3
+TurnText                          000000A3
+TxReg                             0000000C
+UsePrescale                       00000000
+Venaa                             000001FC
+Venaa2                            000001F8
+Viiva2                            0000001C
+Viiva3                            0000001D
+Viivahdys                         0000001B
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 26
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+W                                 00000000
+WaitForNextSel                    000000D2
+Wheti2                            00000204
+YliY2                             000001D4
+YliYheksan                        000001C0
+_BIT1_INIT                        00000000
+_BaudRate                         000012C0
+_ClkIn                            003D0900
+_ClkOut                           000F4240
+_Cycle_Offset1                    24
+_CyclesPerBit                     000000D0
+_DataBits                         00000008
+_FalseStartBit                    00000282
+_FrameErr                         SerialStatus,5
+_IntVector                        00000004
+_NextRcvBit                       0000029F
+_NextTxmtBit                      0000024F
+_ODD_PARITY                       FALSE
+_OPTION_INIT                      0000000F
+_OPTION_SBIT                      00000028
+_PARITY_ENABLE                    FALSE
+_ParityErr                        SerialStatus,4
+_ParityOrStop                     00000248
+_PinSampled                       00000294
+_RcvNextBit                       00000285
+_RcvP_Or_S                        00000299
+_RcvStopBit                       00000299
+_ResetVector                      00000000
+_SBitCycles                       00000104
+_SBitDetected                     00000277
+_SampleAgain                      00000292
+_StopBit                          0000024C
+_StopBits                         00000001
+_TxmtNextBit                      00000240
+_TxmtStartBit                     0000025C
+_USE_RTSCTS                       FALSE
+__16C84                           00000001
+_c                                _status,0
+_carry                            _status,0
+_dc                               _status,1
+_eeadr                            00000009
+_eecon1                           00000008
+_eecon2                           00000009
+_eedata                           00000008
+_eeie                             _intcon,6
+_eeif                             _eecon1,4
+_fsr                              00000004
+_gie                              _intcon,7
+_indf                             00000000
+_int                              _portb,0
+_intcon                           0000000B
+_inte                             _intcon,4
+_intedg                           option,6
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 27
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+_intf                             _intcon,1
+_irp                              _status,7
+_option                           00000001
+_parityBit                        SerialStatus,7
+_pcl                              00000002
+_pclath                           0000000A
+_pd                               _status,3
+_porta                            00000005
+_portb                            00000006
+_ps0                              option,0
+_ps1                              option,1
+_ps2                              option,2
+_psa                              option,3
+_rbie                             _intcon,3
+_rbif                             _intcon,0
+_rbpu                             option,7
+_rcvOver                          SerialStatus,3
+_rcvProgress                      SerialStatus,2
+_rd                               _eecon1,0
+_rp0                              _status,5
+_rp1                              _status,6
+_rtcc                             00000001
+_rte                              option,4
+_rtie                             _intcon,5
+_rtif                             _intcon,2
+_rts                              option,5
+_status                           00000003
+_tempCompute                      00000001
+_to                               _status,4
+_trisa                            00000005
+_trisb                            00000006
+_txmtEnable                       SerialStatus,1
+_txmtProgress                     SerialStatus,0
+_wr                               _eecon1,1
+_wren                             _eecon1,2
+_wrerr                            _eecon1,3
+_z                                _status,2
+counter                           00000019
+crlf                              000000D9
+ekaseg                            00000005
+gtenth                            000001E8
+kirjain                           00000014
+movlf                             
+over                              000001EF
+paikka                            00000015
+prints                            
+sb2                               00000191
+tempo                             00000018
+tokaseg                           0000004A
+venaa2                            000001FF
+w                                 00000000
+MPASM 01.30.01 Intermediate     SEVEN.ASM   10-11-2005  12:41:23         PAGE 28
+RS232 Communications : Half Duplex : PIC16C6x/7x/8x
+7-Segment n„ytt”
+MEMORY USAGE MAP ('X' = Used,  '-' = Unused)
+
+
+0000 : X---XXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0040 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0080 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+00C0 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0100 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0140 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0180 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+01C0 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0200 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0240 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0280 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXX------------ ----------------
+02C0 : ---------------- ---------------- ---------------- ----------------
+
+All other memory blocks unused.
+
+Program Memory Words Used:   673
+Program Memory Words Free:   351
+
+
+Errors   :     0
+Warnings :     0 reported,     0 suppressed
+Messages :     0 reported,     0 suppressed
+
+
