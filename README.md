@@ -4,4 +4,4 @@
 
 "ulostus2" outputs characters to it via serial port.
 
-It also inteprets GPS-signals, outputting strings like "TURN LEFT"
+It also interprets GPS-signals, outputting strings like "TURN LEFT"
