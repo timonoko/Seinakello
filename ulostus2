@@ -1,20 +1,38 @@
-#!/bin/bash
+#! /usr/bin/python3
+import sys,serial,time,os
 
-if dmesg | grep "usb 5-1: pl2303 converter now attached to ttyUSB1" ; then
- portti=/dev/ttyUSB1
-else
- portti=/dev/ttyUSB0
-fi
+def tr_translate(text, from_chars, to_chars):
+    translation_table = str.maketrans(from_chars, to_chars)
+    return text.translate(translation_table)
 
-/bin/stty -F $portti 4800
+output = sys.argv[1]
 
-str=$1
-len=${#str}
-c=0
-while [ $c -lt $len ] ; do
- char=${str:$c:1} 
- char=$( echo "$char" | /bin/sed -s y/abcdefghijklmnopqrstuvxyäöÄÖ°/ABCDEFGHIJKLMNOPQRSTUVXYababc/ )
- echo -n "$char" > $portti
-# if [ "$char" == "." ] ; then sleep 0.01 ; else sleep 0.011 ; fi
- c=$(( $c + 1 ))
-done
+output = tr_translate(output, 'abcdefghijklmnopqrstuvwxyzäöÄÖ°', 'ABCDEFGHIJKLMNOPQRSTUVWXYZababc')
+
+
+port = '/dev/ttyUSB0'
+baud_rate = 4800    
+
+try:
+    ser = serial.Serial(port, baud_rate, timeout=1)
+    pisicount=0
+    while os.path.isfile('/tmp/ulostusbusy') and pisicount<100:
+        pisicount+=1
+        print("pisi")
+        time.sleep(0.5)
+    with open('/tmp/ulostusbusy', 'w') as the_file:
+        the_file.write('busy\n')
+    for character in output:
+        if not ord(character) in range(19,127): character="*"
+        ser.write(character.encode())
+        if character!='.':
+            time.sleep(0.2)
+        else:
+            time.sleep(0.05)
+    os.remove('/tmp/ulostusbusy')
+except serial.SerialException as e:
+    print(f"Error opening serial port: {e}")
+finally:
+    if 'ser' in locals():
+        ser.close()
+
